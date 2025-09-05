@@ -1,7 +1,7 @@
 """
 Stadtjeföhl Auftritte – Streamlit + Google Sheets + SQLite
 - PIN-Gate (Default: 2422; optional TEAM_PIN/TEAM_PINS aus Secrets)
-- Google Sheet lesen/schreiben (Julian/Valentin/weitere Techniker-Spalten)
+- Google Sheet lesen/schreiben (Techniker-Spalten)
 - Kommentar im Expander
 - .ics-Download + Google-Kalender-Link
 """
@@ -23,19 +23,21 @@ from google.oauth2.service_account import Credentials
 
 APP_TITLE = "🎵 Stadtjeföhl Auftritte – Techniker Verfügbarkeiten"
 DB_PATH = Path("gigs.db")
-SHEET_NAME = "geplant 2526"     # Tabellenblatt-Name im Google Sheet
-PRIMARY = "#ff2b95"             # Magenta Akzentfarbe
+SHEET_NAME = "geplant 2526"
+PRIMARY = "#ff2b95"
 TZ = ZoneInfo("Europe/Berlin")
 
-# -------------------------------------------------
+# -----------------------------
+# Helpers
+# -----------------------------
+def to_text(val) -> str:
+    """Konvertiert beliebige Zellwerte sicher zu Text; pd.NA/NaN/None -> ''. """
+    return "" if pd.isna(val) else str(val).strip()
+
+# -----------------------------
 # PIN-Gate
-# -------------------------------------------------
+# -----------------------------
 def pin_gate(default_pin: str = "2422") -> None:
-    """
-    Einfache PIN-Sperre vor allen Inhalten.
-    - Nutzt TEAM_PIN oder TEAM_PINS (kommagetrennt) aus Secrets, falls vorhanden.
-    - Fällt sonst auf default_pin zurück (hier: "2422").
-    """
     pins = set()
     single = str(st.secrets.get("TEAM_PIN", "")).strip()
     multi = str(st.secrets.get("TEAM_PINS", "")).strip()
@@ -47,8 +49,7 @@ def pin_gate(default_pin: str = "2422") -> None:
         pins.update(p.strip() for p in multi.split(",") if p.strip())
 
     if not pins:
-        return  # keine Sperre
-
+        return
     if st.session_state.get("auth_ok"):
         return
 
@@ -64,16 +65,14 @@ def pin_gate(default_pin: str = "2422") -> None:
                 st.error("Falscher PIN.")
     st.stop()
 
-# -------------------------------------------------
+# -----------------------------
 # Google Sheets: Auth
-# -------------------------------------------------
+# -----------------------------
 def get_gspread_client():
-    # robust gegenüber '''/""" in Secrets und "\n" im private_key
     raw = st.secrets["GSPREAD_SERVICE_ACCOUNT"]
     info = json.loads(raw) if isinstance(raw, str) else dict(raw)
     if "private_key" in info and isinstance(info["private_key"], str):
         info["private_key"] = info["private_key"].replace("\\n", "\n")
-
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -81,9 +80,9 @@ def get_gspread_client():
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     return gspread.authorize(creds)
 
-# -------------------------------------------------
-# SQLite: Verfügbarkeiten
-# -------------------------------------------------
+# -----------------------------
+# SQLite
+# -----------------------------
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA foreign_keys = ON;")
@@ -121,9 +120,9 @@ def load_availability() -> pd.DataFrame:
     with get_conn() as conn:
         return pd.read_sql_query("SELECT * FROM availability", conn)
 
-# -------------------------------------------------
+# -----------------------------
 # Datenmodell
-# -------------------------------------------------
+# -----------------------------
 @dataclass
 class ColumnMap:
     col_date: str = "Datum"
@@ -137,29 +136,24 @@ class ColumnMap:
 
 @st.cache_data(show_spinner=False)
 def read_excel() -> pd.DataFrame:
-    """
-    Liest das Tabellenblatt als DataFrame (Zeile 1 = Header).
-    Robust gegen doppelte Header (führt mehrere 'Kommentar'-Spalten zusammen).
-    """
+    """Liest das Tabellenblatt; robust gegen doppelte Header (Kommentar zusammenführen)."""
     gc = get_gspread_client()
     sh = gc.open_by_key(st.secrets["GSHEET_ID"])
     ws = sh.worksheet(SHEET_NAME)
 
-    # Original-Header
+    # Header deduplizieren
     orig_headers = ws.row_values(1)
-    dedup_headers = []
-    seen = {}
+    dedup_headers, seen = [], {}
     for h in orig_headers:
         name = (h or "").strip() or f"__col{len(dedup_headers)+1}"
-        base = name
-        if base in seen:
-            seen[base] += 1
-            name = f"{base}_{seen[base]}"
+        if name in seen:
+            seen[name] += 1
+            name = f"{name}_{seen[name]}"
         else:
-            seen[base] = 1
+            seen[name] = 1
         dedup_headers.append(name)
 
-    rows = ws.get_all_records(expected_headers=dedup_headers)  # ab Zeile 2
+    rows = ws.get_all_records(expected_headers=dedup_headers)
     df = pd.DataFrame(rows)
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -171,7 +165,6 @@ def read_excel() -> pd.DataFrame:
         for c in comment_cols:
             if c != "Kommentar":
                 df.drop(columns=c, inplace=True)
-
     return df
 
 def build_events_df(df: pd.DataFrame, cmap: ColumnMap) -> pd.DataFrame:
@@ -185,21 +178,18 @@ def build_events_df(df: pd.DataFrame, cmap: ColumnMap) -> pd.DataFrame:
     out["city"]     = df[cmap.col_city]
     out["duration"] = df[cmap.col_duration] if cmap.col_duration in df.columns else ""
     out["comment"]  = df[cmap.col_comment]  if cmap.col_comment  in df.columns else ""
-
     out["event_id"] = (
         out["date"].astype(str) + "|" + out["time"] + "|" +
         out["event"] + "|" + out["venue"] + "|" + out["city"]
-    ).apply(lambda x: str(abs(hash(x))))  # Achtung: processabhängig, aber belassen für bestehende Daten
-
+    ).apply(lambda x: str(abs(hash(x))))
     out["display_dt"] = out.apply(lambda r: f"{r['date']} {r['time']}", axis=1)
     out = out.sort_values(["date", "time"]).reset_index(drop=True)
     return out
 
-# -------------------------------------------------
+# -----------------------------
 # Kalender-Helfer
-# -------------------------------------------------
+# -----------------------------
 def parse_time_str(s: str) -> time:
-    """Akzeptiert '19:30', '19.30', '19', '08:00:00'."""
     if not s:
         return time(0, 0)
     s = str(s).strip().replace(".", ":")
@@ -211,8 +201,7 @@ def parse_time_str(s: str) -> time:
     return time(hh, mm)
 
 def parse_duration_minutes(s: str | int | float | None, default_min: int = 120) -> int:
-    """Parst Dauer aus '90', '1:30', '1h30', '2h', '2 Std', '150 min', '1,5h' etc."""
-    if s is None:
+    if s is None or pd.isna(s):
         return default_min
     if isinstance(s, (int, float)) and not pd.isna(s):
         val = float(s)
@@ -282,9 +271,9 @@ def google_calendar_link(summary: str, start_dt: datetime, end_dt: datetime, loc
 def safe_filename(s: str) -> str:
     return (re.sub(r"[^\w\-\.]+", "_", s, flags=re.UNICODE) or "event").strip("_")
 
-# -------------------------------------------------
-# Schreiben ins Google Sheet (Techniker-Spalten)
-# -------------------------------------------------
+# -----------------------------
+# Schreiben ins Google Sheet
+# -----------------------------
 def write_status_to_excel(sheet_row_index_1based: int, tech_name: str, status: str) -> None:
     gc = get_gspread_client()
     sh = gc.open_by_key(st.secrets["GSHEET_ID"])
@@ -296,21 +285,17 @@ def write_status_to_excel(sheet_row_index_1based: int, tech_name: str, status: s
         raise ValueError(f"Spalte '{tech_name}' nicht gefunden. Lege im Sheet eine Spalte mit diesem Namen an.")
     ws.update_cell(sheet_row_index_1based, col_index_1based, status)
 
-# -------------------------------------------------
+# -----------------------------
 # App
-# -------------------------------------------------
+# -----------------------------
 def main():
     st.set_page_config(page_title="Stadtjeföhl – Auftritte", page_icon="🎵", layout="wide")
-
-    # PIN vor allem
     pin_gate(default_pin="2422")
 
-    # Header-Bild + Titel
     HEADER_IMAGE = "https://stadtjefoehl.de/gallery_gen/e89a9bad2aae7e59e5ff2d16af1d1bc4_1932x964_0x0_1932x966_crop.jpg?ts=1754470199"
     st.image(HEADER_IMAGE, width=250)
     st.markdown(f"<h1 style='color:#111; text-align:left; margin-top: 10px;'>{APP_TITLE}</h1>", unsafe_allow_html=True)
 
-    # Styling
     st.markdown(f"""
         <style>
         .stApp {{ background: linear-gradient(180deg, #fafafb 0%, #eef0f7 100%); }}
@@ -343,7 +328,6 @@ def main():
 
     init_db()
 
-    # Sidebar
     with st.sidebar:
         st.image("logo.png", width=160)
         if st.session_state.get("auth_ok"):
@@ -357,7 +341,6 @@ def main():
             st.cache_data.clear()
             st.rerun()
 
-    # Events laden
     try:
         cmap = ColumnMap()
         events = build_events_df(read_excel(), cmap)
@@ -372,19 +355,21 @@ def main():
         eid = row["event_id"]
         date_obj = row["date"]
         date_str = date_obj.strftime("%d.%m.%Y") if hasattr(date_obj, "strftime") else str(date_obj)
-        title = f"{date_str} — {row['time']} — {row['event']} — {row['venue']} ({row['city']})"
+        title = f"{date_str} — {to_text(row['time'])} — {to_text(row['event'])} — {to_text(row['venue'])} ({to_text(row['city'])})"
 
         with st.expander(title, expanded=False):
-            # Adresse, Dauer, Kommentar
-            if isinstance(row.get("address"), str) and row["address"].strip():
-                st.markdown(f"**📍 Adresse:** {row['address']}")
-                # Optional: Google Maps Link
-                maps_q = urllib.parse.quote(str(row["address"]))
+            # Adresse, Dauer, Kommentar (sicher auslesen)
+            addr_text = to_text(row.get("address"))
+            if addr_text:
+                st.markdown(f"**📍 Adresse:** {addr_text}")
+                maps_q = urllib.parse.quote(addr_text)
                 st.markdown(f"[🗺️ Auf Google Maps anzeigen](https://www.google.com/maps/search/?api=1&query={maps_q})")
-            dur_text = str(row.get("duration") or "").strip()
+
+            dur_text = to_text(row.get("duration"))
             if dur_text:
                 st.markdown(f"**⏱ Dauer:** {dur_text}")
-            cmt_text = str(row.get("comment") or "").strip()
+
+            cmt_text = to_text(row.get("comment"))
             if cmt_text:
                 st.markdown(f"**💬 Kommentar:** {cmt_text}")
 
@@ -401,12 +386,15 @@ def main():
 
             # Kalender-Export
             try:
-                start_t = parse_time_str(row["time"])
+                start_t = parse_time_str(to_text(row.get("time")))
                 dur_min = parse_duration_minutes(row.get("duration"))
                 start_local, end_local = build_dt_range(row["date"], start_t, dur_min)
-                summary = str(row["event"])
-                location = " ".join([str(x) for x in [row.get("venue"), row.get("address"), row.get("city")] if str(x).strip()])
-                details = cmt_text or "Stadtjeföhl Auftritt"
+
+                venue = to_text(row.get("venue"))
+                city  = to_text(row.get("city"))
+                summary  = to_text(row.get("event"))
+                location = " ".join([v for v in [venue, addr_text, city] if v])
+                details  = cmt_text or "Stadtjeföhl Auftritt"
 
                 ics_text = make_ics(
                     uid=eid,
@@ -416,7 +404,7 @@ def main():
                     location=location,
                     description=details,
                 )
-                fname = safe_filename(f"{date_str}_{row['event']}_{row['venue']}.ics")
+                fname = safe_filename(f"{date_str}_{summary}_{venue}.ics")
                 col1, col2 = st.columns(2)
                 with col1:
                     st.download_button("📥 In Kalender (.ics) speichern", data=ics_text, file_name=fname, mime="text/calendar", key=f"ics-{eid}-{idx}")
