@@ -1,9 +1,10 @@
 """
 Stadtjeföhl Auftritte – Streamlit + Google Sheets + SQLite
-- PIN-Gate (Default: 2422; optional TEAM_PIN/TEAM_PINS aus Secrets)
-- Google Sheet lesen/schreiben (Techniker-Spalten)
-- Kommentar im Expander
-- .ics-Download + Google-Kalender-Link
+
+Erforderliche Streamlit-Secrets (Cloud: Settings → Secrets | lokal: ./.streamlit/secrets.toml):
+- GSPREAD_SERVICE_ACCOUNT = kompletter JSON-Inhalt des Service-Account-Keys (zwischen ''' ... ''')
+- GSHEET_ID = ID des Google Sheets (Teil der URL zwischen /d/ und /edit)
+- TEAM_PIN  = "DEIN_PIN"              # oder TEAM_PINS = "1111,2222,3333"
 """
 
 from __future__ import annotations
@@ -23,33 +24,37 @@ from google.oauth2.service_account import Credentials
 
 APP_TITLE = "🎵 Stadtjeföhl Auftritte – Techniker Verfügbarkeiten"
 DB_PATH = Path("gigs.db")
-SHEET_NAME = "geplant 2526"
-PRIMARY = "#ff2b95"
+SHEET_NAME = "geplant 2526"   # Tabellenblatt-Name im Google Sheet
+PRIMARY = "#ff2b95"           # Magenta Akzentfarbe
 TZ = ZoneInfo("Europe/Berlin")
 
 # -----------------------------
-# Helpers
+# Utility
 # -----------------------------
 def to_text(val) -> str:
-    """Konvertiert beliebige Zellwerte sicher zu Text; pd.NA/NaN/None -> ''. """
+    """Sicher zu Text wandeln; pd.NA/NaN/None -> ''. """
     return "" if pd.isna(val) else str(val).strip()
 
 # -----------------------------
-# PIN-Gate
+# PIN-Gate (nur aus Secrets)
 # -----------------------------
-def pin_gate(default_pin: str = "2422") -> None:
+def pin_gate() -> None:
+    """
+    Einfache PIN-Sperre. Liest PIN(s) ausschließlich aus Secrets:
+    TEAM_PIN (ein PIN) oder TEAM_PINS (kommagetrennt).
+    """
     pins = set()
     single = str(st.secrets.get("TEAM_PIN", "")).strip()
     multi = str(st.secrets.get("TEAM_PINS", "")).strip()
-    if default_pin:
-        pins.add(default_pin.strip())
     if single:
         pins.add(single)
     if multi:
         pins.update(p.strip() for p in multi.split(",") if p.strip())
 
     if not pins:
-        return
+        st.error("PIN ist nicht konfiguriert. Bitte TEAM_PIN (oder TEAM_PINS) in den Streamlit-Secrets setzen.")
+        st.stop()
+
     if st.session_state.get("auth_ok"):
         return
 
@@ -73,6 +78,7 @@ def get_gspread_client():
     info = json.loads(raw) if isinstance(raw, str) else dict(raw)
     if "private_key" in info and isinstance(info["private_key"], str):
         info["private_key"] = info["private_key"].replace("\\n", "\n")
+
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -81,7 +87,7 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 # -----------------------------
-# SQLite
+# SQLite (Verfügbarkeiten)
 # -----------------------------
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
@@ -136,7 +142,10 @@ class ColumnMap:
 
 @st.cache_data(show_spinner=False)
 def read_excel() -> pd.DataFrame:
-    """Liest das Tabellenblatt; robust gegen doppelte Header (Kommentar zusammenführen)."""
+    """
+    Liest das Tabellenblatt als DataFrame (Zeile 1 = Header).
+    Robust gegen doppelte Header (führt mehrere 'Kommentar'-Spalten zusammen).
+    """
     gc = get_gspread_client()
     sh = gc.open_by_key(st.secrets["GSHEET_ID"])
     ws = sh.worksheet(SHEET_NAME)
@@ -153,7 +162,7 @@ def read_excel() -> pd.DataFrame:
             seen[name] = 1
         dedup_headers.append(name)
 
-    rows = ws.get_all_records(expected_headers=dedup_headers)
+    rows = ws.get_all_records(expected_headers=dedup_headers)  # ab Zeile 2
     df = pd.DataFrame(rows)
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -178,10 +187,13 @@ def build_events_df(df: pd.DataFrame, cmap: ColumnMap) -> pd.DataFrame:
     out["city"]     = df[cmap.col_city]
     out["duration"] = df[cmap.col_duration] if cmap.col_duration in df.columns else ""
     out["comment"]  = df[cmap.col_comment]  if cmap.col_comment  in df.columns else ""
+
+    # Achtung: abs(hash(...)) ist processabhängig; beibehalten, um bestehende DB-Einträge nicht zu brechen
     out["event_id"] = (
         out["date"].astype(str) + "|" + out["time"] + "|" +
         out["event"] + "|" + out["venue"] + "|" + out["city"]
     ).apply(lambda x: str(abs(hash(x))))
+
     out["display_dt"] = out.apply(lambda r: f"{r['date']} {r['time']}", axis=1)
     out = out.sort_values(["date", "time"]).reset_index(drop=True)
     return out
@@ -290,12 +302,16 @@ def write_status_to_excel(sheet_row_index_1based: int, tech_name: str, status: s
 # -----------------------------
 def main():
     st.set_page_config(page_title="Stadtjeföhl – Auftritte", page_icon="🎵", layout="wide")
-    pin_gate(default_pin="2422")
 
+    # PIN vor allem
+    pin_gate()
+
+    # Header-Bild + Titel
     HEADER_IMAGE = "https://stadtjefoehl.de/gallery_gen/e89a9bad2aae7e59e5ff2d16af1d1bc4_1932x964_0x0_1932x966_crop.jpg?ts=1754470199"
     st.image(HEADER_IMAGE, width=250)
     st.markdown(f"<h1 style='color:#111; text-align:left; margin-top: 10px;'>{APP_TITLE}</h1>", unsafe_allow_html=True)
 
+    # Styling (doppelte Klammern in CSS, da f-string)
     st.markdown(f"""
         <style>
         .stApp {{ background: linear-gradient(180deg, #fafafb 0%, #eef0f7 100%); }}
@@ -328,6 +344,7 @@ def main():
 
     init_db()
 
+    # Sidebar
     with st.sidebar:
         st.image("logo.png", width=160)
         if st.session_state.get("auth_ok"):
@@ -341,6 +358,7 @@ def main():
             st.cache_data.clear()
             st.rerun()
 
+    # Events laden
     try:
         cmap = ColumnMap()
         events = build_events_df(read_excel(), cmap)
@@ -358,7 +376,7 @@ def main():
         title = f"{date_str} — {to_text(row['time'])} — {to_text(row['event'])} — {to_text(row['venue'])} ({to_text(row['city'])})"
 
         with st.expander(title, expanded=False):
-            # Adresse, Dauer, Kommentar (sicher auslesen)
+            # Adresse, Dauer, Kommentar
             addr_text = to_text(row.get("address"))
             if addr_text:
                 st.markdown(f"**📍 Adresse:** {addr_text}")
