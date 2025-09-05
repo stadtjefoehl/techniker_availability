@@ -2,18 +2,8 @@
 Stadtjeföhl Auftritte – Streamlit + Google Sheets + SQLite
 
 Benötigte Secrets (lokal in .streamlit/secrets.toml oder in Streamlit Cloud → Settings → Secrets):
-- GSPREAD_SERVICE_ACCOUNT = "type": "service_account",
-  "project_id": "stadtjefoehl",
-  "private_key_id": "aa4a8b7e8fad97c1b50548bcc948b5ae78b3f29c",
-  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDGVAoDoCgIIhtt\nfy56qVx7uz1/SaIIFYVa2XKB3n/fpdF53PVaDYfS8ECMklKoTGfzJicO1ufxThSC\noonz1qZJ744wJhrwrFZaRtT3moXSPsSRcQhQXgSX3tgDcqJUZAeaYVjNTrqOGcYZ\nvL7lZXoQ+Is0xGzB4P5lBYkHJWpEymqraNuYEGPFAXKLybgpMDFz/T7C/l1dwltW\n1Qn/MnroDQp+0U/1vfvlIbjuWVSSMRIm2JyZb4lRAjQir8WeuHVZJmGNy3kazloF\nOKzdktlo4GMi7XN4X0X4feUz6chzBqv+DiNZcr9K6Wh32dl+wbr+1DwWm1HZ/Ym2\nWYUmdr6/AgMBAAECggEAB0T6Tv1g/5dRyQwshct3u9ig8u2d1k0E+SUCQ6IGWYoS\n6Qlr0X6wd/oIFlRLWlGJTTTHTA3ILPnvL4X0p4Q6eSL3jmqUeeDfPhTdkSvP9Dpf\nwHL+WoUaXFS14eki676fjA2TEIduYsStabEXkCyi3O9h7tpfoCWhPXkGokVBUBRz\naE5wx7g29vm59TVlwAF0EwIMiS7oFAElM8IUWOk93pnpBbvi1/VA9epbC23TQNHl\nyPMZ835B8Qpb+C/JLxkbIYxi3wljk/eeQdVekpkRlgXBz2Xo8EVBiZUm3DQxJTYm\njHDd05WHAkhCsgfOVTEgsQjA9V+PsQJ6QN9nmcDA7QKBgQDvc+fiSheEcEkKq2Wx\nC4PyC0iLYzmA7fHLdbCq0H/4X6vS+3nIJXYJfj4HTd50G6TrfF8TRRLdEi7E80gP\nSp2pijlBGY8JeY9uZNhYRFgPtQEViLbzwcMkoC6S6mHJX0tkPitqxb0838MdPrZO\nEHfqHpu9Y5VYWIC5FaWPzMtiwwKBgQDUCJx6QWpHe7j2pwANJcAh4BZQheROmdnG\nr0pVziKOfEESm0bYD1xB2ZQtxNWaJYmwUWTaxlo1/dJHW8O2zX44PrwPRNZ4r5gY\nkZ7cnxf9pWCuA60qK9ooLsNCKD1789FUlOAwJ4CWWYloIEWygcJprj62WeACyaKw\nwum53f38VQKBgADNxs1/qiyLo/MhOCor+7loSEoPfzXrlpA0SO+J26QdzhnbNkFx\nvr+xaMvlewWwwhD4TelmpfWQBhArMOa8PWNAT4jkaRKDEfQw6nkBYbpLxUEpQFP5\nJoqM7xsXJlTiuQIRI1wsZcI6jhEfEMWaUIy8pZExMGMniOcWJ4QgD965AoGBAMVh\nfskQPC9vLS/vJk0W51ShliQ/f9jrv58Fbt2RlvmtEaaQhdJ7+hYSxa4VngJxD0vj\neU9vdmrsbeOfuQFjKiyRud885apTS/MTHB+kumCUovta0MiBKgReA8aCTzokLqne\nLRSmsT1E/HTCFh+mS6S1YAvAfpgZvClwSMONs/JBAoGAbx008z57aH6iXNwQsU0+\nKApNLreyl9tD39HBRng44TSF2ldArBTJFPyqrGsfKAfiZGb3bMso2jBx949Tyi9I\nqc1Z67XSU07lyXBngd6/qNbUgibvvd5wtN0fSHJPJNxlgPE+bqkZHEHyKONdPkpD\ny0v4ZXZL5w1mxDR/YNcxPQU=\n-----END PRIVATE KEY-----\n",
-  "client_email": "stadtjefoehl-streamlit-sheets@stadtjefoehl.iam.gserviceaccount.com",
-  "client_id": "106939897770585768125",
-  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-  "token_uri": "https://oauth2.googleapis.com/token",
-  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/stadtjefoehl-streamlit-sheets%40stadtjefoehl.iam.gserviceaccount.com",
-  "universe_domain": "googleapis.com"
-- GSHEET_ID = "1RGkpRAPTX9Zm95BNLAwBP74Cvc8sbg9ITUU2bhp7hQI"
+- GSPREAD_SERVICE_ACCOUNT = kompletter JSON-Inhalt des Service-Account-Keys
+- GSHEET_ID = ID des Google Sheets (Teil der URL zwischen /d/ und /edit)
 """
 
 from __future__ import annotations
@@ -37,7 +27,15 @@ PRIMARY = "#ff2b95"          # Magenta Akzentfarbe
 # Google Sheets: Auth
 # -------------------------------------------------
 def get_gspread_client():
-    info = json.loads(st.secrets["GSPREAD_SERVICE_ACCOUNT"])
+    # robust gegenüber '''/""" in Secrets und \n im private_key
+    raw = st.secrets["GSPREAD_SERVICE_ACCOUNT"]
+    if isinstance(raw, str):
+        info = json.loads(raw)
+    else:
+        info = dict(raw)
+    if "private_key" in info and isinstance(info["private_key"], str):
+        info["private_key"] = info["private_key"].replace("\\n", "\n")
+
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -97,7 +95,8 @@ class ColumnMap:
     col_address: str = "Adresse"
     col_venue: str = "Location"
     col_city: str = "Stadt"
-    col_duration: str = "Dauer"  # NEU
+    col_duration: str = "Dauer"
+    col_comment: str = "Kommentar"   # NEU
 
 @st.cache_data(show_spinner=False)
 def read_excel() -> pd.DataFrame:
@@ -115,15 +114,16 @@ def build_events_df(df: pd.DataFrame, cmap: ColumnMap) -> pd.DataFrame:
     # Die echte Tabellenzeile merken (Header = 1, Daten beginnen bei 2)
     out["xl_row"] = (df.reset_index(drop=True).index + 2).astype(int)
 
-    out["date"]    = pd.to_datetime(df[cmap.col_date], errors="coerce").dt.date
-    out["time"]    = df[cmap.col_time].astype(str)
-    out["event"]   = df[cmap.col_event]
-    out["address"] = df[cmap.col_address]
-    out["venue"]   = df[cmap.col_venue]
-    out["city"]    = df[cmap.col_city]
-    out["duration"]= df[cmap.col_duration]
+    out["date"]     = pd.to_datetime(df[cmap.col_date], errors="coerce").dt.date
+    out["time"]     = df[cmap.col_time].astype(str)
+    out["event"]    = df[cmap.col_event]
+    out["address"]  = df[cmap.col_address]
+    out["venue"]    = df[cmap.col_venue]
+    out["city"]     = df[cmap.col_city]
+    out["duration"] = df[cmap.col_duration] if cmap.col_duration in df.columns else ""
+    out["comment"]  = df[cmap.col_comment] if cmap.col_comment in df.columns else ""  # NEU
 
-    # stabile event_id
+    # stabile event_id (vereinfachte Variante)
     out["event_id"] = (
         out["date"].astype(str)
         + "|" + out["time"]
@@ -137,10 +137,10 @@ def build_events_df(df: pd.DataFrame, cmap: ColumnMap) -> pd.DataFrame:
     return out
 
 # -------------------------------------------------
-# Google Sheets: Schreiben (Julian / Valentin)
+# Google Sheets: Schreiben (Techniker-Spalten)
 # -------------------------------------------------
 def write_status_to_excel(sheet_row_index_1based: int, tech_name: str, status: str) -> None:
-    """Schreibt den Status in die Spalte des Technikers (Julian/Valentin) in derselben Zeile."""
+    """Schreibt den Status in die Spalte des Technikers (Name = Spaltenkopf) in derselben Zeile, falls vorhanden."""
     gc = get_gspread_client()
     sh = gc.open_by_key(st.secrets["GSHEET_ID"])
     ws = sh.worksheet(SHEET_NAME)
@@ -149,7 +149,8 @@ def write_status_to_excel(sheet_row_index_1based: int, tech_name: str, status: s
     try:
         col_index_1based = [h.strip().lower() for h in headers].index(tech_name.strip().lower()) + 1
     except ValueError:
-        raise ValueError(f"Spalte '{tech_name}' nicht gefunden. Bitte im Sheet anlegen.")
+        # Spalte existiert nicht → freundlich abbrechen
+        raise ValueError(f"Spalte '{tech_name}' nicht gefunden. Lege im Sheet eine Spalte mit diesem Namen an.")
 
     ws.update_cell(sheet_row_index_1based, col_index_1based, status)
 
@@ -231,20 +232,14 @@ def main():
 
     init_db()
 
-    # Sidebar: Logo + Name
+    # Sidebar: Logo + Name + Refresh
     with st.sidebar:
         st.image("logo.png", width=160)
         st.header("👤 Dein Name")
         tech_name = st.text_input("Name für Eintragung", value="", placeholder="Dein Name")
-
-        # Optional: schneller Verbindungs-Test zu Google Sheets
-        # if st.button("🔌 Sheets-Test"):
-        #     try:
-        #         gc = get_gspread_client()
-        #         sh = gc.open_by_key(st.secrets["GSHEET_ID"])
-        #         st.success(f"Verbunden: {sh.title}")
-        #     except Exception as e:
-        #         st.error(f"Sheets-Verbindung fehlgeschlagen: {e}")
+        if st.button("🔄 Aktualisieren"):
+            st.cache_data.clear()
+            st.rerun()
 
     # Events laden
     try:
@@ -264,12 +259,15 @@ def main():
         title = f"{date_str} — {row['time']} — {row['event']} — {row['venue']} ({row['city']})"
 
         with st.expander(title, expanded=False):
-            # Adresse & Dauer nur im Expander
+            # Adresse & Dauer & Kommentar nur im Expander
             if isinstance(row.get("address"), str) and row["address"].strip():
                 st.markdown(f"**📍 Adresse:** {row['address']}")
             dur_text = str(row.get("duration") or "").strip()
             if dur_text:
                 st.markdown(f"**⏱ Dauer:** {dur_text}")
+            cmt_text = str(row.get("comment") or "").strip()
+            if cmt_text:
+                st.markdown(f"**💬 Kommentar:** {cmt_text}")
 
             a_df = avail[avail["event_id"] == eid].copy()
             counts = a_df.groupby("status").size().reindex(["Kann","Unsicher","Kann nicht"], fill_value=0)
@@ -297,15 +295,14 @@ def main():
                 )
                 if st.button("Speichern", key=f"save-{eid}-{idx}"):
                     upsert_availability(eid, tech_name, status)
-                    # Für Julian/Valentin zusätzlich ins Google Sheet schreiben
-                    if tech_name.strip().lower() in {"julian", "valentin"}:
-                        try:
-                            write_status_to_excel(int(row["xl_row"]), tech_name.strip(), status)
-                            st.success("Gespeichert (App + Google Sheet).")
-                        except Exception as ex:
-                            st.warning(f"Gespeichert in App. Google-Sheet-Update fehlgeschlagen: {ex}")
-                    else:
-                        st.success("Gespeichert.")
+                    # Versuche ins Google Sheet zu schreiben, wenn eine Spalte mit diesem Namen existiert
+                    try:
+                        write_status_to_excel(int(row["xl_row"]), tech_name.strip(), status)
+                        st.success("Gespeichert (App + Google Sheet).")
+                    except ValueError:
+                        st.info("Gespeichert in der App. Lege im Sheet eine Spalte mit deinem Namen an, um auch dort zu schreiben.")
+                    except Exception as ex:
+                        st.warning(f"Gespeichert in der App. Google-Sheet-Update fehlgeschlagen: {ex}")
                     st.cache_data.clear()
                     st.rerun()
             else:
