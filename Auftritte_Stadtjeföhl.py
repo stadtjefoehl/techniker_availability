@@ -1,5 +1,9 @@
 """
 Stadtjeföhl Auftritte – Streamlit + Google Sheets + SQLite
+- PIN-Gate (Default: 2422; optional TEAM_PIN/TEAM_PINS aus Secrets)
+- Google Sheet lesen/schreiben (Julian/Valentin/weitere Techniker-Spalten)
+- Kommentar im Expander
+- .ics-Download + Google-Kalender-Link
 """
 
 from __future__ import annotations
@@ -19,19 +23,54 @@ from google.oauth2.service_account import Credentials
 
 APP_TITLE = "🎵 Stadtjeföhl Auftritte – Techniker Verfügbarkeiten"
 DB_PATH = Path("gigs.db")
-SHEET_NAME = "geplant 2526"  # Tabellenblatt-Name im Google Sheet
-PRIMARY = "#ff2b95"          # Magenta Akzentfarbe
+SHEET_NAME = "geplant 2526"     # Tabellenblatt-Name im Google Sheet
+PRIMARY = "#ff2b95"             # Magenta Akzentfarbe
 TZ = ZoneInfo("Europe/Berlin")
+
+# -------------------------------------------------
+# PIN-Gate
+# -------------------------------------------------
+def pin_gate(default_pin: str = "2422") -> None:
+    """
+    Einfache PIN-Sperre vor allen Inhalten.
+    - Nutzt TEAM_PIN oder TEAM_PINS (kommagetrennt) aus Secrets, falls vorhanden.
+    - Fällt sonst auf default_pin zurück (hier: "2422").
+    """
+    pins = set()
+    single = str(st.secrets.get("TEAM_PIN", "")).strip()
+    multi = str(st.secrets.get("TEAM_PINS", "")).strip()
+    if default_pin:
+        pins.add(default_pin.strip())
+    if single:
+        pins.add(single)
+    if multi:
+        pins.update(p.strip() for p in multi.split(",") if p.strip())
+
+    if not pins:
+        return  # keine Sperre
+
+    if st.session_state.get("auth_ok"):
+        return
+
+    with st.sidebar:
+        st.subheader("🔒 Team-Zugang")
+        pin = st.text_input("Team-PIN", type="password", placeholder="PIN")
+        if st.button("Anmelden"):
+            if pin in pins:
+                st.session_state["auth_ok"] = True
+                st.success("Willkommen!")
+                st.rerun()
+            else:
+                st.error("Falscher PIN.")
+    st.stop()
 
 # -------------------------------------------------
 # Google Sheets: Auth
 # -------------------------------------------------
 def get_gspread_client():
+    # robust gegenüber '''/""" in Secrets und "\n" im private_key
     raw = st.secrets["GSPREAD_SERVICE_ACCOUNT"]
-    if isinstance(raw, str):
-        info = json.loads(raw)
-    else:
-        info = dict(raw)
+    info = json.loads(raw) if isinstance(raw, str) else dict(raw)
     if "private_key" in info and isinstance(info["private_key"], str):
         info["private_key"] = info["private_key"].replace("\\n", "\n")
 
@@ -55,9 +94,9 @@ def init_db():
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS availability (
-                event_id TEXT NOT NULL,
-                tech_name TEXT NOT NULL,
-                status   TEXT NOT NULL CHECK(status IN ('Kann','Kann nicht','Unsicher')),
+                event_id   TEXT NOT NULL,
+                tech_name  TEXT NOT NULL,
+                status     TEXT NOT NULL CHECK(status IN ('Kann','Kann nicht','Unsicher')),
                 updated_at TEXT NOT NULL,
                 UNIQUE(event_id, tech_name)
             );
@@ -80,8 +119,7 @@ def upsert_availability(event_id: str, tech_name: str, status: str):
 
 def load_availability() -> pd.DataFrame:
     with get_conn() as conn:
-        df = pd.read_sql_query("SELECT * FROM availability", conn)
-    return df
+        return pd.read_sql_query("SELECT * FROM availability", conn)
 
 # -------------------------------------------------
 # Datenmodell
@@ -99,20 +137,46 @@ class ColumnMap:
 
 @st.cache_data(show_spinner=False)
 def read_excel() -> pd.DataFrame:
-    """Liest das Tabellenblatt aus dem Google Sheet als DataFrame (Zeile 1 = Header)."""
+    """
+    Liest das Tabellenblatt als DataFrame (Zeile 1 = Header).
+    Robust gegen doppelte Header (führt mehrere 'Kommentar'-Spalten zusammen).
+    """
     gc = get_gspread_client()
     sh = gc.open_by_key(st.secrets["GSHEET_ID"])
     ws = sh.worksheet(SHEET_NAME)
-    rows = ws.get_all_records()  # ab Zeile 2 (Header = Zeile 1)
+
+    # Original-Header
+    orig_headers = ws.row_values(1)
+    dedup_headers = []
+    seen = {}
+    for h in orig_headers:
+        name = (h or "").strip() or f"__col{len(dedup_headers)+1}"
+        base = name
+        if base in seen:
+            seen[base] += 1
+            name = f"{base}_{seen[base]}"
+        else:
+            seen[base] = 1
+        dedup_headers.append(name)
+
+    rows = ws.get_all_records(expected_headers=dedup_headers)  # ab Zeile 2
     df = pd.DataFrame(rows)
     df.columns = [str(c).strip() for c in df.columns]
+
+    # Kommentar-Spalten zusammenführen
+    comment_cols = [c for c in df.columns if c.lower().startswith("kommentar")]
+    if comment_cols:
+        tmp = df[comment_cols].replace({"": pd.NA, "nan": pd.NA})
+        df["Kommentar"] = tmp.bfill(axis=1).iloc[:, 0]
+        for c in comment_cols:
+            if c != "Kommentar":
+                df.drop(columns=c, inplace=True)
+
     return df
 
 def build_events_df(df: pd.DataFrame, cmap: ColumnMap) -> pd.DataFrame:
     out = pd.DataFrame()
-    # echte Tabellenzeile merken (Header=1, Daten ab 2)
-    out["xl_row"] = (df.reset_index(drop=True).index + 2).astype(int)
-
+    out["xl_row"]   = (df.reset_index(drop=True).index + 2).astype(int)  # Header=1, Daten ab 2
     out["date"]     = pd.to_datetime(df[cmap.col_date], errors="coerce").dt.date
     out["time"]     = df[cmap.col_time].astype(str)
     out["event"]    = df[cmap.col_event]
@@ -120,16 +184,12 @@ def build_events_df(df: pd.DataFrame, cmap: ColumnMap) -> pd.DataFrame:
     out["venue"]    = df[cmap.col_venue]
     out["city"]     = df[cmap.col_city]
     out["duration"] = df[cmap.col_duration] if cmap.col_duration in df.columns else ""
-    out["comment"]  = df[cmap.col_comment] if cmap.col_comment in df.columns else ""
+    out["comment"]  = df[cmap.col_comment]  if cmap.col_comment  in df.columns else ""
 
-    # stabile ID (lassen wir bei der bisherigen Hash-Variante, um vorhandene Einträge nicht zu brechen)
     out["event_id"] = (
-        out["date"].astype(str)
-        + "|" + out["time"]
-        + "|" + out["event"]
-        + "|" + out["venue"]
-        + "|" + out["city"]
-    ).apply(lambda x: str(abs(hash(x))))
+        out["date"].astype(str) + "|" + out["time"] + "|" +
+        out["event"] + "|" + out["venue"] + "|" + out["city"]
+    ).apply(lambda x: str(abs(hash(x))))  # Achtung: processabhängig, aber belassen für bestehende Daten
 
     out["display_dt"] = out.apply(lambda r: f"{r['date']} {r['time']}", axis=1)
     out = out.sort_values(["date", "time"]).reset_index(drop=True)
@@ -139,18 +199,15 @@ def build_events_df(df: pd.DataFrame, cmap: ColumnMap) -> pd.DataFrame:
 # Kalender-Helfer
 # -------------------------------------------------
 def parse_time_str(s: str) -> time:
-    """Robuste Zeit-Parsing: akzeptiert '19:30', '19.30', '19', '08:00:00'."""
+    """Akzeptiert '19:30', '19.30', '19', '08:00:00'."""
     if not s:
         return time(0, 0)
-    s = str(s).strip()
-    s = s.replace(".", ":")
+    s = str(s).strip().replace(".", ":")
     m = re.match(r"^\s*(\d{1,2})(?::(\d{1,2}))?(?::\d{1,2})?\s*$", s)
     if not m:
         return time(0, 0)
-    hh = int(m.group(1))
-    mm = int(m.group(2) or 0)
-    hh = max(0, min(hh, 23))
-    mm = max(0, min(mm, 59))
+    hh = max(0, min(int(m.group(1)), 23))
+    mm = max(0, min(int(m.group(2) or 0), 59))
     return time(hh, mm)
 
 def parse_duration_minutes(s: str | int | float | None, default_min: int = 120) -> int:
@@ -159,29 +216,23 @@ def parse_duration_minutes(s: str | int | float | None, default_min: int = 120) 
         return default_min
     if isinstance(s, (int, float)) and not pd.isna(s):
         val = float(s)
-        return int(val*60) if val <= 10 else int(val)  # <=10 als Stunden interpretiert
-    txt = str(s).strip().lower()
+        return int(val*60) if val <= 10 else int(val)
+    txt = str(s).strip().lower().replace(",", ".")
     if not txt:
         return default_min
-    txt = txt.replace(",", ".")
-    # 1) Muster H:MM
     m = re.match(r"^\s*(\d{1,2}):(\d{1,2})\s*$", txt)
     if m:
         return int(m.group(1))*60 + int(m.group(2))
-    # 2) 1.5h oder 1.5 h
     m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*h", txt)
     if m:
         return int(round(float(m.group(1))*60))
-    # 3) 1h30
     m = re.match(r"^\s*(\d+)\s*h\s*(\d{1,2})\s*$", txt)
     if m:
         return int(m.group(1))*60 + int(m.group(2))
-    # 4) Minuten
     m = re.match(r"^\s*(\d+)\s*(?:min|m|minuten)?\s*$", txt)
     if m:
         val = int(m.group(1))
         return int(val*60) if val <= 10 else val
-    # Fallback reine Zahl
     if txt.isdigit():
         val = int(txt)
         return int(val*60) if val <= 10 else val
@@ -193,12 +244,10 @@ def build_dt_range(d: date, t: time, duration_min: int) -> tuple[datetime, datet
     return start_local, end_local
 
 def ics_datetime(dt: datetime) -> str:
-    """RFC5545 Zulu Format."""
     return dt.astimezone(ZoneInfo("UTC")).strftime("%Y%m%dT%H%M%SZ")
 
 def make_ics(uid: str, start_dt: datetime, end_dt: datetime, summary: str, location: str, description: str) -> str:
     now_z = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    # Escape Kommas/Semikola in TEXT-Feldern
     def esc(s: str) -> str:
         return (s or "").replace("\\", "\\\\").replace(",", r"\,").replace(";", r"\;").replace("\n", r"\n")
     return "\r\n".join([
@@ -231,8 +280,7 @@ def google_calendar_link(summary: str, start_dt: datetime, end_dt: datetime, loc
     return base + "&" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
 
 def safe_filename(s: str) -> str:
-    s = re.sub(r"[^\w\-\.]+", "_", s, flags=re.UNICODE)
-    return s.strip("_") or "event"
+    return (re.sub(r"[^\w\-\.]+", "_", s, flags=re.UNICODE) or "event").strip("_")
 
 # -------------------------------------------------
 # Schreiben ins Google Sheet (Techniker-Spalten)
@@ -254,7 +302,10 @@ def write_status_to_excel(sheet_row_index_1based: int, tech_name: str, status: s
 def main():
     st.set_page_config(page_title="Stadtjeföhl – Auftritte", page_icon="🎵", layout="wide")
 
-    # Kleines Header-Bild oben
+    # PIN vor allem
+    pin_gate(default_pin="2422")
+
+    # Header-Bild + Titel
     HEADER_IMAGE = "https://stadtjefoehl.de/gallery_gen/e89a9bad2aae7e59e5ff2d16af1d1bc4_1932x964_0x0_1932x966_crop.jpg?ts=1754470199"
     st.image(HEADER_IMAGE, width=250)
     st.markdown(f"<h1 style='color:#111; text-align:left; margin-top: 10px;'>{APP_TITLE}</h1>", unsafe_allow_html=True)
@@ -295,6 +346,11 @@ def main():
     # Sidebar
     with st.sidebar:
         st.image("logo.png", width=160)
+        if st.session_state.get("auth_ok"):
+            if st.button("🚪 Abmelden"):
+                st.session_state.clear()
+                st.cache_data.clear()
+                st.rerun()
         st.header("👤 Dein Name")
         tech_name = st.text_input("Name für Eintragung", value="", placeholder="Dein Name")
         if st.button("🔄 Aktualisieren"):
@@ -322,6 +378,9 @@ def main():
             # Adresse, Dauer, Kommentar
             if isinstance(row.get("address"), str) and row["address"].strip():
                 st.markdown(f"**📍 Adresse:** {row['address']}")
+                # Optional: Google Maps Link
+                maps_q = urllib.parse.quote(str(row["address"]))
+                st.markdown(f"[🗺️ Auf Google Maps anzeigen](https://www.google.com/maps/search/?api=1&query={maps_q})")
             dur_text = str(row.get("duration") or "").strip()
             if dur_text:
                 st.markdown(f"**⏱ Dauer:** {dur_text}")
@@ -340,7 +399,7 @@ def main():
                 </div>
             """, unsafe_allow_html=True)
 
-            # Kalender-Funktionen
+            # Kalender-Export
             try:
                 start_t = parse_time_str(row["time"])
                 dur_min = parse_duration_minutes(row.get("duration"))
@@ -364,14 +423,13 @@ def main():
                 with col2:
                     gcal_url = google_calendar_link(summary, start_local, end_local, location, details)
                     st.markdown(f"[➕ In Google Kalender hinzufügen]({gcal_url})")
-
             except Exception as cal_err:
                 st.caption(f"Kalender-Export nicht verfügbar: {cal_err}")
 
             # Tabelle der Einträge
             if not a_df.empty:
                 a_df = a_df.sort_values("tech_name")[["tech_name", "status", "updated_at"]]
-                a_df = a_df.rename(columns={"tech_name": "Name", "status": "Status", "updated_at": "Aktualisiert (UTC)"})
+                a_df.rename(columns={"tech_name": "Name", "status": "Status", "updated_at": "Aktualisiert (UTC)"}, inplace=True)
                 st.dataframe(a_df, use_container_width=True, hide_index=True)
             else:
                 st.caption("Noch keine Einträge.")
@@ -386,7 +444,6 @@ def main():
                 )
                 if st.button("Speichern", key=f"save-{eid}-{idx}"):
                     upsert_availability(eid, tech_name, status)
-                    # Versuche ins Google Sheet zu schreiben, wenn es eine passende Spalte gibt
                     try:
                         write_status_to_excel(int(row["xl_row"]), tech_name.strip(), status)
                         st.success("Gespeichert (App + Google Sheet).")
